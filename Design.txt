@@ -1,0 +1,54 @@
+ATM-BANK Protocol:
+
+
+From the start, all communications between the ATM and bank are encrypted so that any person seeing packet transfers between the two are not able to perform
+and exploits.  As the user enters their card into the ATM, it will immediately check the authenticity of the card using SHA-256 and RSA encryption techniques.  If the card proves to
+be legitimate, the user will then have to enter their pin.  Throughout this entire user input session, the program actively guards against any injection or overflow attacks by
+escaping potential dangerous characters and limiting command space to certain number of characters.  Finally, once both of these checks pass, the user will then be allowed to log in.
+All messages between the ATM and Bank are fully encrypted so that any eavecsdropper will not be able to decipher the communication happening between them.  We used the
+Diffie-Hellman exchange in order to generate a shared yet secret private key that both the ATM and Bank share.  This allows each data packet to be encrypted using that secret key
+and decrypted once it reaches the other end.  The init code creates the necessary files and the program will check if those files exist.
+
+
+List of attacks that we anticipated:
+
+Buffer Overflow
+	We prevented buffer overflow attacks by making sure each input is sanitized to only read in the appropriate amount of characters.  For example,
+	It will only read in 4 characters when prompting for a pin.  We did this by using commands such as fgets() rather than scanf() when reading
+	 in input.  This way, any buffer-overflow attemp would not work since the rest of the injected code will not be read at all.
+
+Command Injection
+	We prevent this attack by sanitizing user input so that any input above 250 characters is cut off.  We check to make sure that each input is indeed
+	a valid command input by using strncmp to only compare the characters that match the length of the intended command .  We also sanitize any
+	special characters from being part of the input ('/','\', etc are not allowed).
+
+Int overflow
+	We check for integer overflows in deposit command by checking first if the int exceeds INT_MAX.  This happens before adding the value
+	to the balance.  We also check that the resulting balance does not exceed the maximum integer too.  This way, any potential attacks that involve breaking the integer 
+	memory of the computer will not work.
+
+Fake .cards
+	Each .card file is a certificate that is signed by RSA-4096 private key that is immediately discarded.  The bank immediately takes a SHA-256 hash of the card and stores it
+	with a user profile.  When a user tries to log in (authenticating), the bank sends the encrypted hash to the atm and the ATM takes a hash of the corresponding card that it has.
+	The ATM would allow a login ONLY if those hashes match.  This prevents attackers from created fake cards (keys) because even if they made a new key, they would be able 
+	to sign it.  
+
+Man-In-The-Middle attack (eavesdropping)
+	We prevent these attacks by encrypting every route of communication between the bank and the ATM, such that even if someone were to wiretap into the communication between
+	the 2, they would not be able to decode what is being done.  We implement a Diffie-Hellman exchange using public keys (that an eavesdropper can see) to generate a shared 
+	secret key un-obtainable by an attacker.  Each communication is encrypted and decrypted using the RSA algorithm.
+
+Insecure Serialization
+	We prevented this type of attack through the encryption of data when sending and recieving messages between the ATM and Bank.  By encrypting the packets, any attacker
+	would not be able to modify packets or headers in order to gain special access to the bank.
+
+We had also considered the threat of a brute force password attack.  Although our code does not account for the attack, we assumed that such an attack was not as important
+because it requires an installed script by the attacker.  In a real life scenario, the ATM is a separate computer from the attackers personal computer, so having it run a brute force
+script is impractical (unless the attacker had the patience to sit at an ATM all day under no suspicion of security cameras).  Regardless, we could have implement a time-out feature
+that would force the program into a timeout session for a certain number of minutes if the user enters the wrong pin too many times.  This wait time would increase exponentially
+as the user keeps getting it wrong, thus discouraging a brute force attack.
+
+It is also important to note that many forms of attacks outside the boundries of the project may still be possible.  For example, if we assume that the display of the ATM is done
+using HTML, an attacker could implement Cross-Site Scripting(XSS) attacks to modify the contents of the ATM screen, possibly leading to the user giving out important confidential
+information.  Although a security measure against this attack is outside of the boundries of this project, it is nonetheless something to consider.
+

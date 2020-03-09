@@ -1,0 +1,8 @@
+./bin/*
+Dockerfile
+atm.sh
+bank.sh
+.vscode/*
+*.card
+*.sh
+*.sh
