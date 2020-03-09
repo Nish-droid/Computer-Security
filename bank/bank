@@ -1,0 +1,589 @@
+#include "bank.h"
+#include "atm-bank/atm-bank.h"
+#include "util/hash_table.h"
+#include "ports.h"
+
+
+Bank* bank_create()
+{
+    Bank *bank = (Bank*) malloc(sizeof(Bank));
+    if(bank == NULL)
+    {
+        perror("Could not allocate Bank");
+        exit(1);
+    }
+
+    // Set up the network state
+    bank->sockfd=socket(AF_INET,SOCK_DGRAM,0);
+
+    bzero(&bank->rtr_addr,sizeof(bank->rtr_addr));
+    bank->rtr_addr.sin_family = AF_INET;
+    bank->rtr_addr.sin_addr.s_addr=inet_addr("127.0.0.1");
+    bank->rtr_addr.sin_port=htons(ROUTER_PORT);
+
+    bzero(&bank->bank_addr, sizeof(bank->bank_addr));
+    bank->bank_addr.sin_family = AF_INET;
+    bank->bank_addr.sin_addr.s_addr=inet_addr("127.0.0.1");
+    bank->bank_addr.sin_port = htons(BANK_PORT);
+    bind(bank->sockfd,(struct sockaddr *)&bank->bank_addr,sizeof(bank->bank_addr));
+
+    bank->user_db = hash_table_create(150);
+
+    bank->active_user = NULL;
+
+    // Set up the protocol state
+    // TODO set up more, as needed
+
+    return bank;
+}
+
+void bank_free(Bank *bank)
+{
+    if(bank != NULL)
+    {
+        close(bank->sockfd);
+        free(bank);
+    }
+}
+
+ssize_t bank_send(Bank *bank, char *data, size_t data_len)
+{
+    // Returns the number of bytes sent; negative on error
+    return sendto(bank->sockfd, data, data_len, 0,
+      (struct sockaddr*) &bank->rtr_addr, sizeof(bank->rtr_addr));
+}
+
+ssize_t bank_send_encrypted(Bank *bank, uint8_t *data, size_t data_len)
+{
+    uint8_t ciphertext[MAX_PACKET_SIZE];
+    int cipher_len = encrypt(data, data_len, bank->key, IV, ciphertext);
+    Cipher cipher;
+    cipher.len = htons(cipher_len);
+    memcpy(cipher.ciphertext, ciphertext, cipher_len);
+    return bank_send(bank, (char *) &cipher, cipher_len + 2);
+}
+
+ssize_t bank_recv(Bank *bank, char *data, size_t max_data_len)
+{
+    // Returns the number of bytes received; negative on error
+    return recvfrom(bank->sockfd, data, max_data_len, 0, NULL, NULL);
+}
+
+ssize_t bank_recv_encrypted(Bank *bank, uint8_t *data, size_t max_data_len)
+{
+    char buffer[MAX_PACKET_SIZE];
+    bank_recv(bank, buffer, MAX_PACKET_SIZE);
+
+    //get ciphertext len and setup buffer
+    int len;
+    memcpy(&len, buffer, 2);
+    len = ntohs(len);
+    uint8_t ciphertext[len];
+    memcpy(ciphertext, buffer + 2, len);
+
+    //decrypt ciphertext
+    int plaintext_len = decrypt(ciphertext, len, bank->key, IV, data);
+    data[plaintext_len] = '\0';
+    return plaintext_len;
+}
+
+void bank_process_local_command(Bank *bank, char *command, size_t len)
+{
+    if (strncmp(command, "create-user", 11) == 0)
+    {
+        create_user_command(bank, command, len);
+    }
+    else if (strncmp(command, "deposit", 7) == 0)
+    {
+        deposit_command(bank, command, len);
+    }
+    else if (strncmp(command, "balance", 7) == 0)
+    {
+        balance_command(bank, command, len);
+    }
+    else
+    {
+        fprintf(stderr, "%s\n\n", "Invalid command");
+    }
+}
+
+void create_user_command(Bank *bank, char *command, size_t len)
+{
+    char cmd[MAX_USERNAME_SIZE];
+    char username[MAX_USERNAME_SIZE + 1];
+    memset(username, '\0', MAX_USERNAME_SIZE + 1);
+    char pin[PIN_SIZE + 1];
+    memset(pin, '\0', PIN_SIZE + 1);
+    uint64_t balance;
+    
+    //Checks balance input and see whether the chars are all digits and not alphabets
+    //- kthant
+    char balanceStr[MAX_USERNAME_SIZE];
+    sscanf(command, "%s %s %s %s", cmd, username, pin, balanceStr);
+
+    if(!checkDigits(balanceStr, strlen(balanceStr))){
+      fprintf(stderr, "Usage:\tcreate-user <user-name> <pin> <balance>\n");
+    }
+    //----------------------
+
+    else if (sscanf(command, "%s %s %s %ld", cmd, username, pin, &balance) < 0)
+    {
+        fprintf(stderr, "Usage:\tcreate-user <user-name> <pin> <balance>\n");
+    }
+
+    else if (!validate_username(username) ||
+             !validate_pin(pin)           ||
+             !validate_amount(balance))
+    {
+        fprintf(stderr, "Usage:\tcreate-user <user-name> <pin> <balance>\n");
+    }
+    else if (user_exists(bank, username))
+    {
+        fprintf(stderr, "Error:\tuser %s already exists\n", username);
+    }
+    else
+    {
+        int user_len = strlen(username);
+        User *new_user = create_new_user(username, user_len, pin, balance);
+        char *key = malloc(user_len + 1);
+        key[user_len] = '\0';
+        strncpy(key, username, user_len);
+        hash_table_add(bank->user_db, key, new_user);
+        issue_card(bank, username);
+
+        if(user_exists(bank, username))
+        {
+            fprintf(stdout, "Created user %s\n\n", username);
+        }
+    }
+}
+
+void deposit_command(Bank *bank, char *command, size_t len)
+{
+    char cmd[MAX_USERNAME_SIZE];
+    char username[MAX_USERNAME_SIZE + 1];
+    memset(username, '\0', MAX_USERNAME_SIZE + 1);
+    int64_t amount;
+
+    //Checks amount input and see whether the chars are all digits and not alphabets
+    //- kthant
+    char amountStr[MAX_USERNAME_SIZE];
+    sscanf(command, "%s %s %s", cmd, username, amountStr);
+
+    if(!checkDigits(amountStr, strlen(amountStr))){
+      fprintf(stderr, "Usage:\tdeposit <user-name> <amt>\n\n");
+    }
+    //----------------------
+
+    else if (sscanf(command, "%s %s %ld", cmd, username, &amount) < 0)
+    {
+        fprintf(stderr, "Usage:\tdeposit <user-name> <amt>\n\n");
+    }
+    else if (amount < 0)
+    {
+        fprintf(stderr, "Usage:\tdeposit <user-name> <amt>\n\n");
+    }
+    else if (amount > INT_MAX)
+    {
+      fprintf(stderr, "Too rich for this program\n\n");
+    }
+    else if (!validate_username(username) ||
+             !validate_balance(amount))
+    {
+      fprintf(stderr, "Usage:\tdeposit <user-name> <amt>\n\n");
+    }
+    else if (!user_exists(bank, username))
+    {
+        fprintf(stderr, "No such user\n\n");
+    }
+    else
+    {
+        User *user = hash_table_find(bank->user_db, username);
+        int64_t added_amount = user->balance + amount;
+        if (added_amount > INT_MAX)
+        {
+            fprintf(stderr, "Too rich for this program\n");
+        }
+        else
+        {
+            user->balance += amount;
+            fprintf(stdout, "$%ld added to %s's account\n\n", amount, username);
+        }
+    }
+}
+
+void balance_command(Bank *bank, char *command, size_t len)
+{
+    char cmd[MAX_USERNAME_SIZE];
+    char username[MAX_USERNAME_SIZE + 1];
+    memset(username, '\0', MAX_USERNAME_SIZE + 1);
+
+    if (sscanf(command, "%s %s", cmd, username) < 0)
+    {
+        fprintf(stderr, "Usage:\tbalance <user-name>\n\n");
+    }
+    else if (!validate_username(username))
+    {
+        fprintf(stderr, "Usage:\tbalance <user-name>\n\n");
+    }
+    else if (!user_exists(bank, username))
+    {
+        fprintf(stderr, "No such user\n\n");
+    }
+    else
+    {
+        User *user = hash_table_find(bank->user_db, username);
+        fprintf(stdout, "$%d\n\n", user->balance);
+    }
+}
+
+void bank_process_remote_command(Bank *bank, char *command, size_t len)
+{
+
+    Header *header = (Header *) command;
+
+    if (bank->active_user == NULL)
+    {
+         //carve header from command
+        header->len   = ntohl(header->len);
+        header->magic = ntohl(header->magic);
+
+        if (header->magic == MAGIC_NUMBER && header->cmd == BEGIN_REQ)
+        {
+            begin_remote_command(bank, command);
+        }
+    }
+    else
+    {
+        if (header->magic == MAGIC_NUMBER)
+        {
+            if (header->cmd == WITHDRAW_REQ)
+            {
+                withdraw_remote_command(bank, command);
+            }
+            else if (header->cmd == BALANCE_REQ)
+            {
+                balance_remote_command(bank, command);
+            }
+            else if (header->cmd == END_REQ)
+            {
+                end_remote_command(bank, command);
+            }
+        }
+    }
+}
+
+void begin_remote_command (Bank *bank, char *command)
+{
+    //carve username len from command and create username buffer
+    uint16_t len;
+    memcpy(&len, command + HEADER_LEN, 2);
+    len = ntohs(len);
+    char username[len + 1];
+
+    //carve username from command - null terminate
+    memcpy(username, command + HEADER_LEN + 2, len);
+    username[len] = '\0';
+
+    //get shared key and create encryption key
+    uint64_t shared = bank_dhke(bank);
+    get_key(shared, bank->key, (uint8_t *) username, len);
+
+    if (user_exists(bank, (char *)username))
+    {
+        //create and send pin request header
+        User *user = hash_table_find(bank->user_db, (char *)username);
+        Header *header = create_header(0x32, PIN_REQ);
+
+        typedef struct _PIN_REQUEST
+        {
+            Header header;
+            uint8_t card[SHA256_DIGEST_LENGTH];
+        }__attribute__((packed)) Pin_Request;
+
+        Pin_Request pin_request;
+
+        pin_request.header.len   = 0x32;
+        pin_request.header.magic = MAGIC_NUMBER;
+        pin_request.header.cmd   = PIN_REQ;
+        memcpy(pin_request.card, user->card, SHA256_DIGEST_LENGTH);
+
+        //encrypt header and send
+        bank_send_encrypted(bank, (uint8_t *) &pin_request, sizeof(Pin_Request));
+        uint8_t plaintext[MAX_PACKET_SIZE];
+        bank_recv_encrypted(bank, plaintext, MAX_PACKET_SIZE);
+        header = (Header *) plaintext;
+
+        if (header->magic == MAGIC_NUMBER && header->cmd == PIN_RESP)
+        {
+            char pin[PIN_SIZE + 1];
+            memcpy(pin, plaintext + HEADER_LEN, PIN_SIZE);
+            pin[PIN_SIZE] = '\0';
+
+            User *user = hash_table_find(bank->user_db, username);
+
+            if (strncmp(user->pin, pin, PIN_SIZE) == 0)
+            {
+                //set user to active
+                user->active = true;
+                bank->active_user = user;
+                //create authorized header and send encrypted
+                header = create_header(0x0, AUTHORIZED);
+                bank_send_encrypted(bank, (uint8_t *) header, HEADER_LEN);
+                free(header);
+            }
+            else
+            {
+                //create not authorized header and send encrypted
+                header = create_header(0x0, NOT_AUTHORIZED);
+                bank_send_encrypted(bank, (uint8_t *) header, HEADER_LEN);
+                free(header);
+            }
+        }
+        else
+        {
+             //create not authorized header and send encrypted
+                header = create_header(0x0, NOT_AUTHORIZED);
+                bank_send_encrypted(bank, (uint8_t *) header, HEADER_LEN);
+                free(header);
+        }
+    }
+    else
+    {
+        //create and send no user exists header
+        Header *header = create_header(0x0, NO_USER_EXISTS);
+        //encrypt header and send
+        bank_send_encrypted(bank, (uint8_t *) header, HEADER_LEN);
+        free(header);
+    }
+}
+
+void withdraw_remote_command (Bank *bank, char *command)
+{
+    int amount;
+    memcpy(&amount, command + HEADER_LEN, 4);
+
+    if (bank->active_user->balance >= amount)
+    {
+        bank->active_user->balance -= amount;
+        Header *header = create_header(0x0, WITHDRAW_SUCCESS);
+        bank_send_encrypted(bank, (uint8_t *) header, HEADER_LEN);
+    }
+    else
+    {
+        Header *header = create_header(0x0, WITHDRAW_FAIL);
+        bank_send_encrypted(bank, (uint8_t *) header, HEADER_LEN);
+    }
+}
+
+void balance_remote_command (Bank *bank, char *command)
+{
+    typedef struct _Balance_Packet
+    {
+        Header header;
+        int balance;
+    } __attribute__((packed)) Balance_Packet;
+
+    Balance_Packet balance;
+
+    balance.header.len = 0x4;
+    balance.header.magic = MAGIC_NUMBER;
+    balance.header.cmd = BALANCE_SUCCESS;
+    balance.balance = bank->active_user->balance;
+
+    bank_send_encrypted(bank, (uint8_t *) &balance, sizeof(Balance_Packet));
+}
+
+void end_remote_command (Bank *bank, char *command)
+{
+    bank->active_user = NULL;
+    memset(bank->key, '\0', SHA256_DIGEST_LENGTH);
+}
+
+int decrypt_command(Bank *bank, char *command, char *plaintext)
+{
+    int len;
+    memcpy(&len, command, 2);
+    len = ntohs(len);
+    uint8_t ciphertext[len];
+    memcpy(ciphertext, command + 2, len);
+
+    //decrypt ciphertext
+    int plaintext_len = decrypt(ciphertext, len, bank->key, IV, (uint8_t *)plaintext);
+    plaintext[plaintext_len] = '\0';
+
+    return plaintext_len;
+}
+
+uint64_t bank_dhke(Bank *bank)
+{
+    srand(time(0));
+    uint64_t seed = rand();
+    srand(seed);
+    uint64_t b = (rand() % 6) + 2;
+
+    uint64_t atm_pub_key;
+    bank_recv(bank, (char *) &atm_pub_key, sizeof(uint64_t));
+    atm_pub_key = be64toh(atm_pub_key);
+
+    uint64_t bank_pub_key    = power(G, b, P);
+    uint64_t bank_pub_key_nl = htobe64(bank_pub_key);
+    bank_send(bank, (char *) &bank_pub_key_nl, sizeof(uint64_t));
+
+    return power(atm_pub_key, b, P);
+}
+
+User *create_new_user(char *username, int user_len, char *pin, uint32_t balance)
+{
+    User *new_user = malloc(sizeof(User));
+    memset(new_user->username, '\0', MAX_USERNAME_SIZE + 1);
+    strncpy(new_user->username, username, user_len);
+    memset(new_user->pin, '\0', PIN_SIZE + 1);
+    strncpy(new_user->pin, pin, PIN_SIZE);
+    new_user->balance = balance;
+    new_user->active = false;
+    memset(new_user->card, '\0', SHA256_DIGEST_LENGTH + 1);
+    return new_user;
+}
+
+void issue_card(Bank *bank, char *username) {
+    char card_name[strlen(username) + 6];
+    memset(card_name, '\0', strlen(username) + 6);
+    strncpy(card_name, username, strlen(username));
+    strcat(card_name, ".card");
+
+    //char key_name[strlen(username) + 5];
+    //memset(key_name, '\0', strlen(username) + 5);
+    //strncpy(key_name, username, strlen(username));
+    //strcat(key_name, ".key");
+
+    EVP_PKEY *pkey;
+    pkey = EVP_PKEY_new();
+
+    BIGNUM *bne = NULL;
+    bne = BN_new();
+	BN_set_word(bne, RSA_F4);
+
+    RSA *rsa;
+    rsa = RSA_new();
+    RSA_generate_key_ex(rsa, 4096, bne, NULL);
+
+    EVP_PKEY_assign_RSA(pkey, rsa);
+
+    X509 * x509;
+    x509 = X509_new();
+
+    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
+    X509_gmtime_adj(X509_get_notBefore(x509), 0);
+    X509_gmtime_adj(X509_get_notAfter(x509), 31536000L);
+
+    X509_set_pubkey(x509, pkey);
+
+    X509_NAME * name;
+    name = X509_get_subject_name(x509);
+
+    X509_NAME_add_entry_by_txt(name, "C",  MBSTRING_ASC, (unsigned char *)"CA", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "O",  MBSTRING_ASC, (unsigned char *)"Bank of Robert Nash and America", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char *)"localhost", -1, -1, 0);
+
+    X509_set_issuer_name(x509, name);
+
+    X509_sign(x509, pkey, EVP_sha1());
+
+    FILE *f;
+    //f = fopen(key_name, "wb");
+
+    //PEM_write_PrivateKey(f, pkey, NULL, NULL, 10, NULL, NULL);
+
+    f = fopen(card_name, "wb");
+    PEM_write_X509(f, x509);
+
+
+    uint8_t buf[SHA256_DIGEST_LENGTH];
+
+    const EVP_MD *digest = EVP_sha256();
+    unsigned len;
+
+    X509_digest(x509, digest, (unsigned char*) buf, &len);
+
+    User *user = hash_table_find(bank->user_db, username);
+    memcpy(user->card, buf, SHA256_DIGEST_LENGTH);
+    fclose(f);
+}
+
+bool user_exists(Bank *bank, char *username)
+{
+    return (hash_table_find(bank->user_db, username) != NULL);
+}
+
+
+// /* -------experimental --------*/
+// uint64_t bank_dhke_(Bank *bank)
+// {
+//     //printf("Alice's generated KeyPair:");
+//     //EVP_PKEY *alicePrivateKey = generateKey();
+
+//     printf("\n\nBob's generated KeyPair:");
+//     EVP_PKEY *bobPrivateKey = generateKey();
+
+//     // Extract the public key from the private key of Alice and Bob,
+//     // So that Alice can be given Bob's public key and Bob can be given Alice's.
+//     // Using ECDH, Alice and Bob will then compute a shared secret, which will be same
+
+//     //EVP_PKEY *alicePubKey = extractPublicKey(alicePrivateKey);
+//     EVP_PKEY *bobPubKey = extractPublicKey(bobPrivateKey);
+
+//     BIO* bio = BIO_new(BIO_s_mem());
+//     int len = PEM_write_bio_PUBKEY(bio, bobPubKey);
+
+//     KE ke;
+//     ke.len = htonl(len);
+//     memcpy(ke.key, bio, len);
+
+//     bank_send(bank, (char *) &ke, len);
+
+//     uint8_t buffer[MAX_PACKET_SIZE];
+//     bank_recv(bank, (char *) buffer, MAX_PACKET_SIZE);
+
+//     memcpy(&len, buffer, 4);
+//     len = ntohl(len);
+//     BIO *bio_rcv = BIO_new(BIO_s_mem());
+
+//     memcpy(bio_rcv, buffer + 4, len);
+
+//     EVP_PKEY *alicePublicKey;
+
+//     PEM_read_bio_PUBKEY(bio_rcv, &alicePublicKey, NULL, NULL);
+
+//     // Here we give to Alice, Bob's public key and Alice computes the shared secret using her private key.
+//     //derivedKey* secretAlice = deriveShared(bobPubKey, alicePrivateKey);
+
+//     // Here we give to Bob, Alice's public key and Bob computes the shared secret using his private key.
+//     derivedKey* secretBob = deriveShared(alicePublicKey, bobPrivateKey);
+
+//     //The following lines of code just print out the shared secret computed by Alice and Bob.
+//     //BIGNUM *secretAliceBN = BN_new();
+
+//     BIGNUM *secretBobBN = BN_new();
+
+//     //BN_bin2bn(secretAlice->secret, secretAlice->length, secretAliceBN);
+
+//     BN_bin2bn(secretBob->secret, secretBob->length, secretBobBN);
+
+//     //printf("\n\nSecret computed by Alice :\n");
+
+//     //BN_print_fp(stdout, secretAliceBN);
+
+//     printf("\nSecret computed by Bob : \n");
+
+//     BN_print_fp(stdout, secretBobBN);
+
+//     //NOTE! It is not recommended to use the computed shared secret as is, usually it should be passed to some
+//     //hash function and then used.
+
+//     //BN_free(secretAliceBN);
+
+//     BN_free(secretBobBN);
+
+//     return 0;
+// }
