@@ -1,0 +1,291 @@
+#include "atm-bank.h"
+
+int encrypt(uint8_t *plaintext, int plaintext_len, uint8_t *key, uint8_t *iv, uint8_t *ciphertext)
+{
+    EVP_CIPHER_CTX *ctx;
+    int len;
+    int ciphertext_len;
+
+    ctx = EVP_CIPHER_CTX_new();
+
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
+
+    EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len);
+
+    ciphertext_len = len;
+
+    EVP_EncryptFinal_ex(ctx, ciphertext + len, &len);
+
+    ciphertext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    return ciphertext_len;
+}
+
+int decrypt(uint8_t *ciphertext, int ciphertext_len, uint8_t *key, uint8_t *iv, uint8_t *plaintext)
+{
+    EVP_CIPHER_CTX *ctx;
+    int len;
+    int plaintext_len;
+
+    ctx = EVP_CIPHER_CTX_new();
+
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
+
+    EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len);
+
+    plaintext_len = len;
+
+    EVP_DecryptFinal_ex(ctx, plaintext + len, &len);
+
+    plaintext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    return plaintext_len;
+}
+
+void get_hash (uint8_t *input, size_t len, uint8_t *output)
+{
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, input, len);
+    SHA256_Final(output, &ctx);
+}
+
+void get_key(uint64_t shared, uint8_t *key, uint8_t *input, uint16_t input_len)
+{
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+
+    get_hash(input, input_len, hash);
+
+    for (int i = 0; i < shared; i++) {
+        get_hash(hash, SHA256_DIGEST_LENGTH, hash);
+    }
+
+    memcpy(key, hash, SHA256_DIGEST_LENGTH);
+}
+
+bool validate_username (char* username)
+{
+
+    if (username == NULL || strcmp(username, "") == 0)
+    {
+        return false;
+    }
+
+	int len = strlen(username);
+
+	if (len > MAX_USERNAME_SIZE) { return false; }
+
+	for (int i = 0; i < len; i++)
+    {
+		if ((username[i] < 'a' || username[i] > 'z') &&
+            (username[i] < 'A' || username[i] > 'Z'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validate_pin (char *pin)
+{
+	if (pin == NULL || strcmp(pin, "") == 0)
+    {
+        return false;
+    }
+
+    int len = strlen(pin);
+
+    if (len != PIN_SIZE) { return false; }
+
+    for (int i = 0; i < PIN_SIZE; i++)
+    {
+        if (pin[i] < '0' || pin[i] > '9')
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validate_balance (int balance)
+{
+    return balance >= 0;
+}
+
+bool validate_amount (long int amount)
+{
+    if (amount < 0 || amount > INT_MAX) {
+        return false;
+    }
+
+    return true;
+}
+
+
+/* -----------helpers----------- */
+
+int64_t power(int64_t a, int64_t b, int64_t p)
+{
+    if (b == 1)
+    {
+        return a;
+    }
+    else
+    {
+        return (((int64_t)pow(a, b)) % p);
+    }
+}
+
+/* -----------utils----------- */
+
+Header *create_header(uint32_t len, char cmd)
+{
+    Header *header  = malloc(sizeof(Header));
+    header->len     = len;
+    header->magic   = MAGIC_NUMBER;
+    header->cmd     = cmd;
+    return header;
+}
+
+void remove_newline(char *line)
+{
+    if (line != NULL && strcmp(line, "") != 0)
+    {
+        for (int i = 0; i < MAX_PACKET_SIZE; i++) {
+            if (line[i] == '\n')
+            {
+                line[i] = '\0';
+                break;
+            }
+        }
+    }
+}
+
+void handle_error (char *msg, int error_code) {
+	fprintf(stderr, "%s\n", msg);
+	exit(error_code);
+}
+
+//new helper method to check all chars are digits on a string
+//-kthant
+
+bool checkDigits(char * str, int len){
+  for (int i = 0; i < len; i++)
+  {
+      if (str[i] < '0' || str[i] > '9')
+      {
+
+          return false;
+      }
+  }
+  return true;
+}
+//----------------------------------
+
+
+
+/* -------experimental --------*/
+
+// EVP_PKEY* generateKey(){
+//     EVP_PKEY_CTX *paramGenCtx = NULL, *keyGenCtx = NULL;
+//     EVP_PKEY *params= NULL, *keyPair= NULL;
+
+//     paramGenCtx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+
+//     if(!EVP_PKEY_paramgen_init(paramGenCtx)) handleErrors();
+
+//     EVP_PKEY_CTX_set_ec_paramgen_curve_nid(paramGenCtx, NID_X9_62_prime256v1);
+
+//     EVP_PKEY_paramgen(paramGenCtx, &params);
+
+//     keyGenCtx = EVP_PKEY_CTX_new(params, NULL);
+
+//     if(!EVP_PKEY_keygen_init(keyGenCtx)) handleErrors();
+
+//     if(!EVP_PKEY_keygen(keyGenCtx, &keyPair)) handleErrors();
+
+//     EC_KEY *ecKey = EVP_PKEY_get1_EC_KEY(keyPair);
+
+//     const BIGNUM   *privKey = EC_KEY_get0_private_key(ecKey);
+
+//     const EC_POINT *pubPoint = EC_KEY_get0_public_key(ecKey);
+
+//     BIGNUM *x = BN_new();
+
+//     BIGNUM *y = BN_new();
+
+//     EC_POINT_get_affine_coordinates_GFp(EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1), pubPoint, x, y, NULL);
+
+//     printf("\nprivate : ");
+
+//     BN_print_fp(stdout, privKey);
+
+//     printf("\npubX : ");
+
+//     BN_print_fp(stdout, x);
+
+//     printf("\npubY : ");
+
+//     BN_print_fp(stdout, y);
+
+//     fflush(stdout);
+
+//     EVP_PKEY_CTX_free(paramGenCtx);
+//     EVP_PKEY_CTX_free(keyGenCtx);
+
+//     return keyPair;
+// }
+
+// EVP_PKEY* extractPublicKey(EVP_PKEY *privateKey){
+//     EC_KEY *ecKey = EVP_PKEY_get1_EC_KEY(privateKey);
+//     const EC_POINT *ecPoint = EC_KEY_get0_public_key(ecKey);
+
+//     EVP_PKEY *publicKey = EVP_PKEY_new();
+
+//     EC_KEY *pubEcKey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+
+//     EC_KEY_set_public_key(pubEcKey, ecPoint);
+
+//     EVP_PKEY_set1_EC_KEY(publicKey, pubEcKey);
+
+//     EC_KEY_free(ecKey);
+//     EC_POINT_free((EC_POINT *)ecPoint);
+
+//     return publicKey;
+// }
+
+// derivedKey* deriveShared(EVP_PKEY *publicKey, EVP_PKEY *privateKey){
+
+//     derivedKey *dk = (derivedKey *)malloc(sizeof(derivedKey));
+
+//     EVP_PKEY_CTX *derivationCtx = NULL;
+
+//     derivationCtx = EVP_PKEY_CTX_new(privateKey, NULL);
+
+//     EVP_PKEY_derive_init(derivationCtx);
+
+//     EVP_PKEY_derive_set_peer(derivationCtx, publicKey);
+
+// 	if(1 != EVP_PKEY_derive(derivationCtx, NULL, (size_t *) &dk->length)) handleDerivationErrors(0);
+
+// 	if(NULL == (dk->secret = OPENSSL_malloc(dk->length))) handleDerivationErrors(1);
+
+// 	if(1 != (EVP_PKEY_derive(derivationCtx, dk->secret, (size_t *) &dk->length))) handleDerivationErrors(2);
+
+//         EVP_PKEY_CTX_free(derivationCtx);
+
+// 	return dk;
+// }
+
+// void handleErrors(){
+//     printf("\n\nFailed...");
+// }
+
+// void handleDerivationErrors(int x){
+//     printf("\n\nDerivation Failed...");
+//     printf("%d", x);
+// }
