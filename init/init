@@ -1,0 +1,60 @@
+/* ------------------------------------------------------------------
+   Nischay Modi
+   Robert Nash
+   Joseph
+   Nick
+
+   University of Maryland, CMSC414, Fall 2019
+
+------------------------------------------------------------------ */
+
+#include "init.h"
+
+int main (int argc, char **argv) {
+
+	if (argc != 2) {
+		fprintf(stdout, "Usage:\tinit <filename>\n");
+		return INCORRECT_ARGS;
+	}
+
+	/* get file name from args */
+	char *init_fname = argv[1];
+	int init_fname_len = strlen(argv[1]);
+
+	/* create proper filenames */
+	char atm_fname[init_fname_len + 5];
+	memset(atm_fname, '\0', init_fname_len + 5);
+	char bank_fname[init_fname_len + 6];
+	memset(bank_fname, '\0', init_fname_len + 6);
+
+	strncpy(atm_fname, init_fname, init_fname_len);
+	strncpy(atm_fname + init_fname_len, ".atm", 5);
+	strncpy(bank_fname, init_fname, init_fname_len);
+	strncpy(bank_fname + init_fname_len, ".bank", 6);
+
+	/* check if files already exist - fail if true */
+	if ((access(atm_fname, F_OK) != -1) || (access(bank_fname, F_OK) != -1)) { 
+		fprintf(stderr, "Error:\tone of the files already exists\n\n");
+		fflush(stderr);
+		return FILE_EXISTS;
+	}
+
+	/* open files if do not exists */
+	FILE *atm  = fopen(atm_fname, "w");
+	FILE *bank = fopen(bank_fname, "w");
+
+	
+	/* throw error if open fails */
+	if (atm == NULL || bank == NULL) { 
+		fprintf(stderr, "Error creating initialization files\n\n");
+		fflush(stderr);
+		return PROGRAM_FAILED;
+	}
+
+	fclose(atm);
+	fclose(bank);
+
+	fprintf(stdout, "Successfully initialized bank state\n\n");
+	fflush(stdout);
+	return EXIT_SUCCESS;
+}
